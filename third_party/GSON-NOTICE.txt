@@ -1,0 +1,4 @@
+Gson 2.11.0
+Copyright 2008 Google Inc.
+Licensed under the Apache License, Version 2.0.
+The complete Apache-2.0 license text is included in PDFJS-LICENSE.txt.

@@ -1,0 +1,23 @@
+{
+  "name": "paper-assistant-mobile",
+  "version": "1.7.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "test": "node --test tests/*.test.mjs ../paper-assistant-next/tests/*.test.mjs",
+    "build:apk": "powershell -ExecutionPolicy Bypass -File scripts/build-apk.ps1"
+  },
+  "dependencies": {
+    "cfb": "1.2.2",
+    "katex": "0.18.7",
+    "mammoth": "1.12.2",
+    "pdfjs-dist": "6.3.289"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "fflate": "0.8.3",
+    "playwright-core": "1.63.0"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.toolchain/
+.signing/
+build/
+android/assets/
+dist/
+test-results/
