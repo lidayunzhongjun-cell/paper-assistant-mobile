@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompactGraph, compactConversation, outlineBatches, sanitizeGraphRelations } from '../web/compact-graph.mjs';
+import { buildCompactGraph, compactConversation, outlineBatches, sanitizeGraphRelations, guideReply, guideExcerpts } from '../web/compact-graph.mjs';
 import { sourceUnits, graphUsable } from '../../paper-assistant-next/src/graph.mjs';
 import { extractDoc } from '../web/legacy-doc.mjs';
 import { docFixture } from './word-fixture.mjs';
@@ -17,6 +17,34 @@ function fixtureModel(invalidFirst=false,invalidRelations=false) {
   }};
 }
 const paper={id:'fixture',title:'原文定位测试',rawText:'1 Introduction\nThe question is causal inference.\n2 Methods\nAdjustment requires exchangeability; result = 42.\n'};
+function revisedFixture(revise){const win=fixtureModel(),fetch=win.fetch;win.fetch=async(url,options)=>{const response=await fetch(url,options),body=await response.json();const data=JSON.parse(body.choices[0].message.content);revise(data);body.choices[0].message.content=JSON.stringify(data);return {ok:true,json:async()=>body};};return win;}
+test('long summaries, string importance and optional term variations retain content without retries',async()=>{
+  const core='只有满足交换性和正值性才可解释此结果。'.repeat(30)+String.raw`\[P(y\mid do(x))=\sum_z P(y\mid x,z)P(z)\]`;
+  const definition='这是长定义，必须保留其条件与限定。'.repeat(40);
+  const win=revisedFixture(d=>{d.brief='完整全文要义。'.repeat(180);for(const n of d.nodes||[]){n.w='2';n.k=core;n.t=[{name:'exchangeability',definition},null,{name:'无定义'}];n.s=null;}});
+  const graph=await buildCompactGraph(win,config,paper,signal);
+  assert.equal(win.calls.length,1);assert.equal(graph.paragraphs[0].summary,core);assert.equal(graph.terms[0].definition,definition);assert.equal(graph.paragraphs[0].importance,'high');assert.ok(graph.stats.skippedTerms>0);assert.match(graph.boundaryNote,/完整保留/);
+  assert.equal(graph.narrative,'完整全文要义。'.repeat(180));assert.ok(graphUsable({...paper,graph}));
+  const request=compactConversation({...paper,graph},{selection:'',messages:[]},'全文核心是什么');assert.ok(JSON.stringify(request.messages).length<30000);assert.match(JSON.stringify(request.messages),/result = 42/);
+});
+test('summary aliases and lists normalize; missing importance stays ordinary and absent brief is assembled',async()=>{
+  const win=revisedFixture(d=>{delete d.brief;for(const n of d.nodes||[]){delete n.k;n.summary=['结论','仅适用于给定条件'];delete n.w;n.a='L'+n.a;n.b=String(n.b);delete n.t;}});
+  const graph=await buildCompactGraph(win,config,paper,signal);
+  assert.equal(win.calls.length,1);assert.equal(graph.paragraphs[0].summary,'结论\n仅适用于给定条件');assert.equal(graph.paragraphs[0].importance,'medium');assert.match(graph.narrative,/给定条件/);assert.match(graph.boundaryNote,/未提供有效重要性/);assert.equal(graph.paragraphs.map(p=>paper.rawText.slice(p.start,p.end)).join(''),paper.rawText);
+});
+test('real missing summaries and overlapping ranges still fail precisely without replacing saved graph',async()=>{
+  for(const [revise,error] of [[d=>{d.nodes[0].k=' ';},/L1–L1.*未返回摘要/],[d=>{d.nodes[1].a=1;},/重叠/]]){
+    const input={...paper,graph:{previous:true}},win=revisedFixture(revise);
+    await assert.rejects(buildCompactGraph(win,config,input,signal),error);assert.equal(win.calls.length,2);assert.deepEqual(input.graph,{previous:true});
+  }
+});
+test('long final synthesis remains intact while question context stays bounded',async()=>{
+  const input={...paper,rawText:Array.from({length:80},(_,i)=>`Evidence ${i} ${'source condition '.repeat(30)}\n`).join('')};
+  const final='重要结论以及限制。'.repeat(500);
+  const win=revisedFixture(d=>{if(!d.nodes)d.brief=final;});const graph=await buildCompactGraph(win,config,input,signal);
+  assert.equal(graph.narrative,final);assert.equal(win.calls.length,outlineBatches(sourceUnits(input.rawText)).length+1);
+  const request=compactConversation({...input,graph},{selection:'',messages:[]},'全文核心是什么');assert.ok(JSON.stringify(request.messages).length<30000);assert.match(JSON.stringify(request.messages),/完整核心保存在图谱中/);
+});
 test('imported summary guides graph while original offsets and source evidence remain intact',async()=>{
   const win=fixtureModel(),input={...paper,graphBuildMode:'summary',graphSummary:{name:'ChatGPT总结.txt',text:'外部总结：讨论因果问题、调整方法及交换性条件。'.repeat(4),imported:123}};
   const graph=await buildCompactGraph(win,config,input,signal);
@@ -26,10 +54,46 @@ test('imported summary guides graph while original offsets and source evidence r
   assert.match(graph.boundaryNote,/尚未逐项核对/);
   await assert.rejects(buildCompactGraph(win,config,{...paper,graphBuildMode:'summary'},signal),/重新导入/);
 });
+test('long imported guide is compressed once before source alignment and keeps requests bounded',async()=>{
+  const win=fixtureModel(),input={...paper,graphBuildMode:'summary',graphSummary:{name:'AI图谱.docx',text:'章节、段落、公式与适用条件。'.repeat(2400),imported:123}};
+  const graph=await buildCompactGraph(win,config,input,signal);
+  assert.ok(graphUsable({...input,graph}));assert.ok(graph.stats.importedSummaryCharacters>30000);assert.ok(graph.stats.guideCharacters<9000);
+  assert.ok(win.calls.length>1);for(const call of win.calls)assert.ok(call.reduce((n,m)=>n+m.content.length,0)<30000);
+});
 test('invalid optional relationships do not discard a complete source-grounded outline',async()=>{
   const win=fixtureModel(false,true),graph=await buildCompactGraph(win,config,paper,signal);
   assert.equal(win.calls.length,1);assert.equal(graph.stats.skippedRelations,3);assert.ok(graphUsable({...paper,graph}));
   assert.ok(graph.edges.some(e=>e.from==='p1'&&e.to==='p2'&&e.type==='解释'));assert.ok(!graph.edges.some(e=>e.to==='L99999'));
+});
+test('guide compression accepts prose, nested JSON, and outputs beyond the old 2600 character gate',async()=>{
+  assert.equal(guideReply('```json\n{"summary":["章节一","条件二"]}\n```'),'章节一\n条件二');
+  assert.match(guideReply('{"brief":{"章节":"结果"}}'),/章节: 结果/);
+  for(const wrap of [text=>text,text=>JSON.stringify({brief:text}),text=>JSON.stringify({outline:[text]})]){
+    const win=fixtureModel(),fetch=win.fetch;let compressions=0;
+    win.fetch=async(url,options)=>{
+      const messages=JSON.parse(options.body).messages;
+      if(messages[0].content.includes('你在凝练')){
+        compressions++;assert.ok(!messages[0].content.includes('章节和行范围必须使用该索引'));
+        return {ok:true,json:async()=>({choices:[{message:{content:wrap('核心与条件。'.repeat(500))},finish_reason:'stop'}]})};
+      }
+      return fetch(url,options);
+    };
+    const graph=await buildCompactGraph(win,config,{...paper,graphBuildMode:'summary',graphSummary:{name:'guide.docx',text:'原始总结。'.repeat(6305)}},signal);
+    assert.ok(graphUsable({...paper,graph}));assert.ok(compressions>0);assert.ok(graph.stats.guideCharacters<=9000);assert.ok(!graph.stats.guideExcerptFallbacks);
+  }
+});
+test('non-shrinking guide output terminates with visible excerpt fallback while retaining original summary',async()=>{
+  const win=fixtureModel(),fetch=win.fetch;let calls=0;
+  win.fetch=async(url,options)=>{
+    if(JSON.parse(options.body).messages[0].content.includes('你在凝练')){
+      calls++;return {ok:true,json:async()=>({choices:[{message:{content:'无效超长输出。'.repeat(2000)},finish_reason:'stop'}]})};
+    }
+    return fetch(url,options);
+  };
+  const input={...paper,graphBuildMode:'summary',graphSummary:{name:'guide.txt',text:'原始总结。'.repeat(6305)}};const original=input.graphSummary.text;
+  const graph=await buildCompactGraph(win,config,input,signal);
+  assert.ok(graphUsable({...input,graph}));assert.ok(calls<=10);assert.ok(graph.stats.guideCharacters<=9000);assert.ok(graph.stats.guideExcerptFallbacks>0);assert.match(graph.boundaryNote,/可能遗漏细节/);assert.equal(input.graphSummary.text,original);
+  assert.ok(guideExcerpts(original).length<=2400);
 });
 test('final graph repair normalizes part ids and drops broken optional edges',()=>{
   const stats={skippedRelations:2},graph={

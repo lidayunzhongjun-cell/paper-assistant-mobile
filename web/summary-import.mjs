@@ -13,6 +13,6 @@ export async function decodeSummary(file) {
   else {try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{text=new TextDecoder('gb18030').decode(bytes);}}
   text=text.replace(/\u0000/g,'').trim();
   if(text.length<30)throw new Error('总结文字过少，至少需要 30 个字符');
-  if(text.length>30000)throw new Error('请将总结凝练到 3 万字符以内');
+  if(text.length>120000)throw new Error('导入文档最多 12 万字符；请分成更凝练的总结后重试');
   return {...file,format,text,imported:Date.now()};
 }

@@ -122,6 +122,7 @@ async function openPaper(id) {
     thread = paper.threads.find(t => t.id === paper.activeThread) || paper.threads[0];
     if (!thread) { thread = makeThread(paper); paper.threads.push(thread); }
     quote = ''; selected = ''; $('question').value = thread.draft || ''; $('paper-title').textContent = paper.title;
+    $('reader-tools').open = false; document.querySelector('.chat-tools').open = false; document.querySelector('.paper-tools').open = false;
     showScreen('paper'); showTab('reader'); renderChat();
     try { await reader.open(paper.id, paper.readingPage || 1, {format:paper.format,mode:paper.readingMode,zoom:paper.readingZoom}); }
     catch (e) { $('pdf-host').textContent = '文档无法打开：' + (e.name === 'PasswordException' ? '此文件有密码，请先解密再导入。' : e.message); throw e; }

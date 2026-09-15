@@ -101,6 +101,10 @@ await context.exposeBinding('testNative', async (_source,req) => {
         content={brief:'从关联问题出发，通过调整方法分析因果解释的前提，指出证据和不确定性。',nodes:lines.map(m=>{if(m[2].trim()==='2 Methods'){chapter='2 Methods';subsection='';}if(m[2].trim()==='2.1 Adjustment')subsection='2.1 Adjustment';if(m[2].trim()==='3 Results'){chapter='3 Results';subsection='';}return {a:+m[1],b:+m[1],c:chapter,s:subsection,k:'本段解释混杂、调整与因果结论的适用条件。',w:2,t:[['confounder','同时影响处理与结局的共同原因']],r:[]};})};
       } else if(system.includes('综合每批大纲') || system.includes('合并这些局部要义')) content={brief:'研究问题、方法与结论由原文串联，因果解释需满足适用条件。',links:[]};
       else content='## 直接回答\n这是模拟模型返回的测试回答。混杂因素同时影响处理与结局。\n## 对照原文\n请结合所选段落和原文判断调整假设。';
+      if(content?.nodes && files.get(activeId)?.graphBuildMode==='summary'){
+        content.nodes[0].k='必须核对交换性条件，结论不能超出证据。'.repeat(20)+String.raw`\(P(y\mid do(x))\)`;
+        content.nodes[0].w='2';content.nodes[0].t=[{name:'exchangeability',definition:'交换性条件'}];
+      }
       const response = {choices:[{message:{content:typeof content==='string'?content:JSON.stringify(content)},finish_reason:'stop'}]};
       if (workerCall) checkpoints[req.index] = {fingerprint,response:copy(response)};
       return response;
@@ -128,6 +132,8 @@ try {
   await page.locator('#library-list .empty').waitFor();await page.screenshot({path:path.join(out,'01-library-empty.png')});
   await page.click('#import-pdf');await page.locator('.paper-card').waitFor();await page.click('.paper-card');
   await page.locator('.textLayer span').first().waitFor();await idle();
+  assert.ok((await page.locator('.tabs').boundingBox()).height<=34,'paper tabs should leave more room for reading');
+  assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),false);await page.click('#reader-tools>summary');assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),true);
   assert.equal(await page.locator('#page-total').textContent(),'2');
   const pixels = await page.locator('#pdf-host canvas').evaluate(c=>({width:c.width,cssWidth:parseFloat(c.style.width)}));
   assert.ok(pixels.width / pixels.cssWidth > 2.9, 'PDF must render at real phone density');
@@ -181,6 +187,7 @@ try {
   await page.click('#read-selection');await page.locator('#chat-panel').waitFor({state:'visible'});await idle();
   assert.ok((await page.locator('#messages').textContent()).includes('模拟模型返回'));
   await page.screenshot({path:path.join(out,'03-close-reading.png')});
+  assert.equal(await page.locator('.chat-tools').evaluate(el=>el.open),false);await page.click('.chat-tools>summary');
   const sessionCount=files.get(id).threads.length;
   await page.click('#new-full');await idle();await page.fill('#question','draft to delete');await page.locator('#question').blur();await page.click('#delete-thread');await idle();
   assert.equal(files.get(id).threads.length,sessionCount);assert.ok(!files.get(id).threads.some(t=>t.draft==='draft to delete'));
@@ -202,6 +209,7 @@ try {
   const messagesBefore = files.get(id).threads.reduce((n,t)=>n+t.messages.length,0);
   assert.ok(messagesBefore >= 2);
   await openUI();await page.locator('.paper-card').waitFor();await page.click('.paper-card');await idle();
+  await page.click('#reader-tools>summary');
   assert.equal(await page.inputValue('#page-number'),'1');
   await page.waitForFunction(()=>document.getElementById('graph-progress-text').textContent.includes('已保存'));
   assert.equal(await page.locator('#reader-panel').isVisible(),true,'Completion must not force a tab switch');
@@ -218,7 +226,7 @@ try {
   // A failed regeneration keeps the last good tree. Resume replays completed batches.
   graphSourceOverride=Array.from({length:100},(_,i)=>`Evidence ${i} ${'source condition '.repeat(30)}\n`).join('');
   failGraphAt = 1;
-  await page.click('[data-tab="chat"]');await page.click('.paper-tools summary');await page.click('#build-graph');
+  await page.click('[data-tab="chat"]');await page.click('.chat-tools>summary');await page.click('.paper-tools summary');await page.click('#build-graph');
   await until(()=>job.status==='error');assert.equal(files.get(id).graphRevision,1);
   await page.locator('#graph-resume').waitFor({state:'visible'});await page.click('#graph-resume');
   await until(()=>job.status==='done');assert.equal(files.get(id).graphRevision,2);assert.ok(replayed>=1);
@@ -254,6 +262,7 @@ try {
   await page.click('#default-storage');await idle();assert.equal(customStorage,false);
   await page.click('#close-settings');
   nextImport='docx';await page.click('#import-pdf');await idle();await page.click(`[data-paper="${wordId}"]`);await idle();
+  await page.click('#reader-tools>summary');
   await page.locator('.word-page h1').waitFor();assert.ok((await page.locator('.word-page').innerText()).includes('研究问题'));
   await page.click('#next-page');await idle();await page.locator('.word-page table').waitFor();
   assert.ok((await page.locator('.word-page table').innerText()).includes('实验组 42'));
@@ -265,8 +274,9 @@ try {
   await page.click('#back-library');await idle();
   nextImport='doc';await page.click('#import-pdf');await idle();await page.click(`[data-paper="${docId}"]`);await idle();
   assert.ok((await page.locator('.word-page').innerText()).includes('采用对照与调整方法'));
-  await page.click('[data-tab="chat"]');if(!await page.locator('.paper-tools').evaluate(el=>el.open))await page.locator('.paper-tools > summary').click();await page.click('#import-summary');await idle();await until(()=>job.status==='done');await page.waitForFunction(()=>document.querySelector('#graph-progress-text').textContent.includes('已保存'));
+  await page.click('[data-tab="chat"]');if(!await page.locator('.chat-tools').evaluate(el=>el.open))await page.locator('.chat-tools > summary').click();if(!await page.locator('.paper-tools').evaluate(el=>el.open))await page.locator('.paper-tools > summary').click();await page.click('#import-summary');await idle();await until(()=>job.status==='done');await page.waitForFunction(()=>document.querySelector('#graph-progress-text').textContent.includes('已保存'));
   assert.equal(files.get(docId).graphSummary.name,'ChatGPT-summary.txt');assert.equal(files.get(docId).graph.importedSummary.name,'ChatGPT-summary.txt');
+  assert.ok(files.get(docId).graph.paragraphs[0].summary.length>220);assert.equal(files.get(docId).graph.paragraphs[0].importance,'high');assert.ok(files.get(docId).graph.terms.some(t=>t.name==='exchangeability'));
   await page.click('[data-tab="graph"]');assert.ok((await page.locator('#graph-content').innerText()).includes('来自导入总结'));await page.screenshot({path:path.join(out,'09-imported-summary.png')});
 
   await page.click('#back-library');await idle();

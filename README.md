@@ -1,8 +1,14 @@
-# 论文精读 · Android 1.7.0
+# 论文精读 · Android 1.8.2
+
+1.8.2 / versionCode 18：段落摘要长度改为提示目标，完整保留超长摘要及公式；兼容字符串/英文重要性、摘要别名和文字列表、原文行号字符串、可选术语为空或对象格式。缺少重要性按普通段落显示；不完整的可选术语跳过并注明。缺少批次要义时用已有摘要串联。全文核心不再因超长失败，问答的定位提示保持限长。真正缺失摘要或原文范围遗漏、重叠仍会报明具体问题，旧图谱不被替换。新增超长摘要/公式/术语、字段变体、全文串联、失败保护与问答预算测试。验证采用模拟 API 返回，未进行红米真机或用户真实 API 测试。
+
+1.8.1 / versionCode 17：导入总结的压缩步骤使用独立提示词，兼容普通文字、Markdown、brief/summary/outline 及嵌套 JSON；不再因为超过 2600 字符而报告格式异常。较长输出继续分层凝练，每次压缩最多尝试两次；仍不能缩短时改用各部分原始摘录，并在图谱说明中明确标记可能遗漏细节，完整导入文档保留。网络和鉴权错误仍如实报告。原文阅读／精读问答／知识图谱标签行从 42px 缩至 32px。验证使用模拟模型返回，未调用用户真实计费 API 或连接红米真机。
 
 独立 Android App，包含本地 PDF / Word 论文库、阅读器和 Paper Assistant Next 2.1.1 的精读核心。无需安装 Zotero；不是在手机运行 XPI，而是复用相同的图谱、检索、对话和缓存清除逻辑。
 
-安装包：`dist/paper-assistant-1.7.0-android.apk`。包名 `org.paperassistant.mobile`，最低 Android 8.0 / API 26，目标 API 35。建议使用更新过的 Android System WebView / Chrome。此包为独立签名的本地测试版本，未上架应用商店。
+安装包：`dist/paper-assistant-1.8.2-android.apk`。包名 `org.paperassistant.mobile`，最低 Android 8.0 / API 26，目标 API 35。建议使用更新过的 Android System WebView / Chrome。此包为独立签名的本地测试版本，未上架应用商店。
+
+1.8.0 / versionCode 16：AI 总结或图谱文档的文字上限由 3 万提高到 12 万字符。超过 9000 字符时先按块生成高密度大纲，再用该大纲与原论文定位片段建立图谱，完整导入文档仍保存在论文缓存中。用户提供的 `IndusAgent_论文知识图谱与逐段学习指南.docx` 经 App 实际解析为 31522 字符，本版可直接导入。原文阅读工具改为默认收起的“阅读工具”栏，点击后展开页码、缩放、文字版和阅读方式；论文顶部“书房—标题—备份”行及标签栏同步压缩，为正文增加可视高度。
 
 1.7.0 / versionCode 15：新增 Lara Translate。设置中填写 Access Key ID 和 Access Key Secret，翻译框即可选择 Lara；通过官方 Lara Java SDK 1.12.0 发起签名请求，使用 Standard、忠实风格和 `text/plain`，并强制启用 `noTrace` 隐私模式。支持自动识别或英语、中文、日语、德语、法语互译，译文继续按论文缓存。ID 与 Secret 由 Android 系统密钥加密保存，不进入页面数据或论文备份。SDK 与 Gson 依赖固定版本并验证 SHA-256；没有真实 Lara 账户密钥，未进行在线计费接口实测。
 
@@ -34,7 +40,7 @@
 
 - 打开任一论文，在“精读问答 → 全文阅读与缓存管理”点击“导入总结建图 · Word / TXT”。支持 ChatGPT 等生成的 DOCX、DOC、TXT 总结；确认后由已配置的 API 后台梳理图谱。
 - 总结为主要梳理材料，附带原论文带行编号的定位片段。长行只提供首尾预览，保留完整原文的本地字符索引；不是将导入总结假装成论文原文。总结未覆盖的位置要求模型标明，节点对应关系仍需原文核对。
-- 总结文件及提取文字存入对应论文 reading.json，跟随备份、存储迁移和论文删除；重新导入会替换该论文保存的总结。单文件最多 2 MB，提取文字 30 至 30000 字符。TXT 支持 UTF-8、UTF-16 BOM 和 GB18030 回退。Word 中图片不作为文字证据。
+- 总结文件及提取文字存入对应论文 reading.json，跟随备份、存储迁移和论文删除；重新导入会替换该论文保存的总结。单文件最多 2 MB，提取文字 30 至 120000 字符；超过 9000 字符时先分块凝练为高密度大纲，再与原文定位片段共同建图。TXT 支持 UTF-8、UTF-16 BOM 和 GB18030 回退。Word 中图片不作为文字证据。
 - 成功后替换图谱，失败保留旧图谱和已保存总结；可用现有“继续建图”恢复。普通“建立全文知识图谱”仍走原文模式。导入来源显示在图谱中，问答要求核对原文并指出总结与原文冲突。
 - API 会收到总结和原文定位片段并按服务规则计费；没有固定的 token 节省比例，取决于总结长度和论文结构。多批论文会重复携带总结。
 
@@ -159,5 +165,5 @@ node scripts/source-package.mjs
 
 Java 存储测试使用 org.json 20240303（仅测试），首次运行从 Maven Central 下载，脚本校验 SHA-256。Android APK 使用系统 org.json，不包含该测试 JAR 或测试替身。Lara Java SDK 1.12.0 与 Gson 2.11.0 由构建脚本从 Maven Central 下载并校验 SHA-256，然后一起编入 APK。
 
-核心许可证：AGPL-3.0-or-later；Lara Java SDK：MIT；Gson、PDF.js 和 CFB：Apache-2.0；Mammoth：BSD-2-Clause。Word 解析参考 [Mammoth](https://github.com/mwilliamson/mammoth.js) 与 [MS-DOC 文本片段规范](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/01d5d8c4-cf9c-4ef9-80fd-439e763cfe01)。对应源码位于同目录的 `paper-assistant-1.7.0-source.zip`，包含手机代码和共享的插件核心，不含个人论文、API Key 或签名私钥。
+核心许可证：AGPL-3.0-or-later；Lara Java SDK：MIT；Gson、PDF.js 和 CFB：Apache-2.0；Mammoth：BSD-2-Clause。Word 解析参考 [Mammoth](https://github.com/mwilliamson/mammoth.js) 与 [MS-DOC 文本片段规范](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/01d5d8c4-cf9c-4ef9-80fd-439e763cfe01)。对应源码位于同目录的 `paper-assistant-1.8.0-source.zip`，包含手机代码和共享的插件核心，不含个人论文、API Key 或签名私钥。
 "# paper-assistant-mobile"  

@@ -11,5 +11,6 @@ test('summary import accepts UTF-8, UTF-16 and both Word formats, preserving ori
 test('empty, unsupported and oversized summaries do not enter paper cache',async()=>{
  await assert.rejects(decodeSummary({name:'x.txt',base64:btoa('short')}),/文字过少/);
  await assert.rejects(decodeSummary({name:'x.pdf',base64:''}),/Word/);
- await assert.rejects(decodeSummary({name:'x.txt',base64:btoa('a'.repeat(30001))}),/3 万/);
+ const accepted=await decodeSummary({name:'ai-graph.txt',base64:btoa('a'.repeat(30590))});assert.equal(accepted.text.length,30590);
+ await assert.rejects(decodeSummary({name:'x.txt',base64:btoa('a'.repeat(120001))}),/12 万/);
 });
