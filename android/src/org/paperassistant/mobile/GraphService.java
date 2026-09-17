@@ -140,11 +140,7 @@ public final class GraphService extends Service {
               case "jobInput":
                 JSONObject input = task.input(); JSONObject meta = library.load(paperId);
                 input.put("id", paperId).put("title", meta.getString("title")).put("format", Library.format(meta));
-                if (!input.has("graphBuildMode")) {
-                  input.put("graphBuildMode", meta.optString("graphBuildMode", "original"));
-                  if (meta.has("graphSummary")) { JSONObject summary = meta.getJSONObject("graphSummary"); input.put("graphSummary", new JSONObject().put("name", summary.getString("name")).put("text", summary.getString("text")).put("imported", summary.optLong("imported"))); }
-                  task.input(input);
-                }
+                input = GraphTask.prepareInput(input, meta); task.input(input);
                 result = new JSONObject().put("paper", input).put("config", task.state().getJSONObject("config")); break;
               case "jobExtracted": task.input(req.getJSONObject("paper")); break;
               case "jobProgress":

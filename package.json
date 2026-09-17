@@ -1,6 +1,6 @@
 {
   "name": "paper-assistant-mobile",
-  "version": "1.8.2",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-or-later",
@@ -10,10 +10,13 @@
     "build:apk": "powershell -ExecutionPolicy Bypass -File scripts/build-apk.ps1"
   },
   "dependencies": {
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
     "cfb": "1.2.2",
     "katex": "0.18.7",
     "mammoth": "1.12.2",
-    "pdfjs-dist": "6.3.289"
+    "pdfjs-dist": "6.3.289",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

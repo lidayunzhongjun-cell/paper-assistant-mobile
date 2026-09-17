@@ -3,15 +3,24 @@ import { renderPixels } from './pdf-scale.mjs';
 import { loadWord, extractWord } from './word-reader.mjs';
 import { pinchFrame } from './gesture.mjs';
 import { arrangeTextLayer, indexedItems } from './paragraph-selection.mjs';
+import { pdfFontOptions } from './pdf-font-mode.mjs';
 GlobalWorkerOptions.workerSrc = './pdf.worker.mjs';
 
 export function pageText(content) {
   return content.items.map(item => 'str' in item ? item.str + (item.hasEOL ? '\n' : ' ') : '').join('').replace(/\u0000/g, '');
 }
-export function loadPdf(id) {
+export function concealTextGlyphs(spans) {
+  for (const span of spans || []) {
+    span.style.setProperty('color','transparent','important');
+    span.style.setProperty('-webkit-text-fill-color','rgba(0, 0, 0, 0)','important');
+    span.style.setProperty('-webkit-text-stroke','0 transparent','important');
+    span.style.setProperty('text-shadow','none','important');
+  }
+}
+export function loadPdf(id,fontMode='web') {
   return getDocument({ url: `https://appassets.androidplatform.net/papers/${id}/document.pdf`,
     cMapUrl: './cmaps/', cMapPacked: true, standardFontDataUrl: './standard_fonts/', wasmUrl: './wasm/',
-    isEvalSupported: false, disableRange: true, disableStream: true });
+    isEvalSupported: false, disableRange: true, disableStream: true, ...pdfFontOptions(fontMode) });
 }
 export async function extractText(pdf, signal, progress = () => {}) {
   let text = ''; const ranges = [];
@@ -35,8 +44,8 @@ export class PdfReader {
     host.addEventListener('touchcancel',e=>this.touchEnd(e),{passive:false});
   }
   async open(id,page=1,options={}) {
-    await this.close();this.format=options.format||'pdf';this.mode=options.mode==='scroll'?'scroll':'paged';this.zoom=Math.min(4,Math.max(.5,options.zoom||1));this.textMode=false;
-    if(this.format==='pdf'){this.loading=loadPdf(id);this.pdf=await this.loading.promise;const first=await this.pdf.getPage(1);this.base=first.getViewport({scale:1});}
+    await this.close();this.format=options.format||'pdf';this.mode=options.mode==='scroll'?'scroll':'paged';this.zoom=Math.min(4,Math.max(.5,options.zoom||1));this.textMode=false;this.fontMode=options.fontMode==='path'?'path':'web';this.host.dataset.fontMode=this.fontMode;
+    if(this.format==='pdf'){this.loading=loadPdf(id,this.fontMode);this.pdf=await this.loading.promise;const first=await this.pdf.getPage(1);this.base=first.getViewport({scale:1});}
     else {this.word=await loadWord(id,this.format);this.pdf={numPages:this.word.numPages};this.base={width:600,height:800};}
     this.page=Math.max(1,Math.min(page,this.pdf.numPages));await this.render();
   }
@@ -116,9 +125,9 @@ export class PdfReader {
         const canvas=document.createElement('canvas');canvas.width=pixels.width;canvas.height=pixels.height;canvas.style.width=viewport.width+'px';canvas.style.height=viewport.height+'px';
         const layer=document.createElement('div');layer.className='textLayer';wrapper.append(canvas,layer);shell.replaceChildren(wrapper);
         item.task=page.render({canvasContext:canvas.getContext('2d',{alpha:false}),viewport,transform:pixels.transform});this.tasks.add(item.task);await item.task.promise;this.tasks.delete(item.task);
-        if(generation!==this.generation)return;const content=await page.getTextContent();item.items=indexedItems(content);item.layer=new TextLayer({textContentSource:content,container:layer,viewport});await item.layer.render();item.layer.textDivs.forEach((span,index)=>span.dataset.textIndex=index);arrangeTextLayer(layer,item.layer,item.items,base.width);
+        if(generation!==this.generation)return;const content=await page.getTextContent();item.items=indexedItems(content);item.layer=new TextLayer({textContentSource:content,container:layer,viewport});await item.layer.render();item.layer.textDivs.forEach((span,index)=>span.dataset.textIndex=index);arrangeTextLayer(layer,item.layer,item.items,base.width);concealTextGlyphs(item.layer.textDivs);
       }
-      item.pending=false;
+      item.pending=false;this.onDecorate?.(shell,n);
     } catch(e){this.rendered.delete(n);if(!['RenderingCancelledException','AbortException'].includes(e.name))throw e;}
   }
   async updateVisible() {

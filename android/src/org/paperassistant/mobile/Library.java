@@ -138,6 +138,10 @@ final class Library {
         JSONObject meta = new JSONObject(readData(id,"paper.json"));
         if (!area.exists(id,"document." + format(meta))) throw new IOException();
         if (!id.equals(meta.optString("id")) || !(meta.opt("title") instanceof String)) throw new IOException();
+        if (area.exists(id,"reading.json")) {
+          JSONObject reading = new JSONObject(readData(id,"reading.json")); JSONArray categories = reading.optJSONArray("categories");
+          if (categories != null) meta.put("categories", categories);
+        }
         papers.put(meta);
       }
       catch (Exception e) { errors.put("一篇论文的元数据异常，文件已保留：" + id.substring(0,8)); }

@@ -15,6 +15,21 @@ final class GraphTask {
     state = library.hasData(paperId,"graph-task.json") ? new JSONObject(library.readData(paperId,"graph-task.json")) : new JSONObject().put("paperId", paperId).put("status", "none");
   }
   synchronized JSONObject state() throws Exception { return new JSONObject(state.toString()); }
+  static JSONObject prepareInput(JSONObject input, JSONObject meta) throws Exception {
+    if (input.optString("rawText", "").isEmpty() && !meta.optString("rawText", "").isEmpty()) {
+      input.put("rawText", meta.getString("rawText"));
+      if (meta.has("pageRanges")) input.put("pageRanges", new JSONArray(meta.getJSONArray("pageRanges").toString()));
+    }
+    if (!input.has("graphBuildMode")) input.put("graphBuildMode", meta.optString("graphBuildMode", "original"));
+    JSONObject saved = meta.optJSONObject("graphSummary"), snapshot = input.optJSONObject("graphSummary");
+    if (saved != null && (snapshot == null || snapshot.optString("text").equals(saved.optString("text")))) {
+      JSONObject summary = snapshot == null ? new JSONObject() : snapshot;
+      for (String key : new String[]{"name", "text", "imported", "headings", "format", "base64"})
+        if (saved.has(key)) summary.put(key, saved.get(key));
+      input.put("graphSummary", summary);
+    }
+    return input;
+  }
   synchronized void begin(JSONObject config, boolean resume) throws Exception {
     if (resume && !state.optString("status").equals("none")) {
       JSONObject saved = state.getJSONObject("config");

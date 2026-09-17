@@ -62,7 +62,7 @@ await context.exposeBinding('testNative', async (_source,req) => {
       if (current && (current.graphRevision || 0) !== (req.paper.graphRevision || 0)) for (const key of graphFields) {
         if (key in current) req.paper[key] = current[key]; else delete req.paper[key];
       }
-      files.set(req.paperId,copy(req.paper));return true;
+      files.set(req.paperId,copy(req.paper));if(library.has(req.paperId))library.set(req.paperId,{...library.get(req.paperId),categories:copy(req.paper.categories||[])});return true;
     }
     case 'graphStart': {
       activeId=req.paperId; if (!req.resume) { graphInput = graphSourceOverride?{rawText:graphSourceOverride,pageRanges:[{pageIndex:0,start:0,end:graphSourceOverride.length}]}:{}; checkpoints = []; }
@@ -130,11 +130,16 @@ assert.equal(workerCompatibility, 'function');
 async function idle(){await page.waitForFunction(()=>document.getElementById('progress').hidden);}
 try {
   await page.locator('#library-list .empty').waitFor();await page.screenshot({path:path.join(out,'01-library-empty.png')});
-  await page.click('#import-pdf');await page.locator('.paper-card').waitFor();await page.click('.paper-card');
+  await page.click('#import-pdf');await page.locator('.paper-card').waitFor();await page.click('[data-classify]');await page.fill('#category-new','因果推断');await page.click('#category-save');await idle();
+  assert.deepEqual(files.get(id).categories,['因果推断']);await page.click('[data-category="因果推断"]');assert.equal(await page.locator('.paper-card').count(),1);await page.click('.paper-card');
   await page.locator('.textLayer span').first().waitFor();await idle();
   assert.ok((await page.locator('.tabs').boundingBox()).height<=34,'paper tabs should leave more room for reading');
-  assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),false);await page.click('#reader-tools>summary');assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),true);
+  assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),false);assert.equal(await page.locator('#annotation-drawer').isVisible(),false);assert.equal(await page.locator('#annotation-drawer').evaluate(el=>el.parentElement.classList.contains('reader-tool-body')),true);await page.click('#reader-tools>summary');assert.equal(await page.locator('#reader-tools').evaluate(el=>el.open),true);
   assert.equal(await page.locator('#page-total').textContent(),'2');
+  await page.setViewportSize({width:1180,height:720});await page.waitForFunction(()=>parseFloat(document.querySelector('#pdf-host canvas').style.width)>800);await page.selectOption('#font-render-mode','path');await idle();await page.waitForFunction(()=>document.getElementById('pdf-host').dataset.fontMode==='path');
+  const tabletGlyph=await page.locator('.textLayer span').first().evaluate(el=>({color:getComputedStyle(el).color,fill:getComputedStyle(el).webkitTextFillColor,colorPriority:el.style.getPropertyPriority('color'),fillPriority:el.style.getPropertyPriority('-webkit-text-fill-color')}));
+  assert.match(tabletGlyph.color,/rgba\([^)]*, 0\)|transparent/);assert.match(tabletGlyph.fill,/rgba\([^)]*, 0\)|transparent/);assert.equal(tabletGlyph.colorPriority,'important');assert.equal(tabletGlyph.fillPriority,'important');
+  await page.screenshot({path:path.join(out,'02-tablet-landscape.png')});await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>parseFloat(document.querySelector('#pdf-host canvas').style.width)<500);await page.selectOption('#font-render-mode','auto');await idle();await page.waitForFunction(()=>document.getElementById('pdf-host').dataset.fontMode==='web');
   const pixels = await page.locator('#pdf-host canvas').evaluate(c=>({width:c.width,cssWidth:parseFloat(c.style.width)}));
   assert.ok(pixels.width / pixels.cssWidth > 2.9, 'PDF must render at real phone density');
   await page.click('#zoom-in');await idle();
@@ -169,6 +174,9 @@ try {
   await page.screenshot({path:path.join(out,'02b-selection.png')});
   await page.click('#selection-action');assert.equal(await page.locator('#reader-panel').isVisible(),true);
   const expanded=await page.locator('#selection-hint').textContent();assert.ok(expanded.includes('整段'));
+  await page.click('#annotate-selection');await page.click('[data-highlight-color="green"]');await page.fill('#annotation-note','这里是方法成立所需的条件。');await page.click('#annotation-save');await idle();
+  assert.equal(files.get(id).annotations.length,1);assert.equal(files.get(id).annotations[0].color,'green');assert.ok(files.get(id).annotations[0].rects.length>0);assert.ok(await page.locator('.saved-highlight-layer i').count()>0);
+  await page.locator('#annotation-drawer>summary').click();assert.ok((await page.locator('#annotation-list').innerText()).includes('这里是方法成立所需的条件'));
   await page.click('#translate-selection');await page.waitForFunction(()=>document.getElementById('translation-status').textContent.includes('翻译完成'));
   const callsAfterTranslation=translationCalls;assert.ok(callsAfterTranslation>0);
   const translationFont=await page.locator('#translation-output').evaluate(el=>parseFloat(getComputedStyle(el).fontSize));
@@ -211,15 +219,20 @@ try {
   await openUI();await page.locator('.paper-card').waitFor();await page.click('.paper-card');await idle();
   await page.click('#reader-tools>summary');
   assert.equal(await page.inputValue('#page-number'),'1');
+  assert.equal(await page.locator('#annotation-count').textContent(),'1 条');await page.locator('#annotation-drawer>summary').click();await page.locator('[data-edit-annotation]').click();await page.waitForFunction(()=>document.getElementById('page-number').value==='2');assert.ok(await page.locator('.saved-highlight-layer i').count()>0,'saved highlight must survive reopening');await page.click('#annotation-close');await page.click('#prev-page');await idle();
   await page.waitForFunction(()=>document.getElementById('graph-progress-text').textContent.includes('已保存'));
   assert.equal(await page.locator('#reader-panel').isVisible(),true,'Completion must not force a tab switch');
+  await page.locator('#graph-dismiss').click();await idle();assert.equal(await page.locator('#graph-progress').isVisible(),false);
+  await page.click('#back-library');await idle();await page.click('.paper-card');await idle();
+  await page.click('#reader-tools>summary');
+  assert.equal(await page.locator('#graph-progress').isVisible(),false,'dismissed completion must stay hidden after reopening');
   const requestsBeforeReopenCache=modelCalls+translationCalls;
   await page.click('#next-page');await idle();
   await page.evaluate(()=>{const node=[...document.querySelectorAll('.textLayer span')].find(el=>el.textContent.includes('The method adjusts')).firstChild;const range=document.createRange();range.selectNodeContents(node);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);document.dispatchEvent(new Event('selectionchange'));});
   await page.click('#translate-selection');await page.waitForFunction(()=>document.getElementById('translation-status').textContent.includes('已保存译文'));
   assert.equal(modelCalls+translationCalls,requestsBeforeReopenCache,'saved translation must survive reopening without a network request');
   await page.click('#translation-close');await page.click('#prev-page');await idle();
-  await page.click('#graph-view');
+  await page.click('[data-tab="graph"]');
   await page.locator('#graph-panel').waitFor({state:'visible'});
   await page.click('#graph-expand');
   await page.screenshot({path:path.join(out,'04-knowledge-tree.png')});
@@ -228,6 +241,7 @@ try {
   failGraphAt = 1;
   await page.click('[data-tab="chat"]');await page.click('.chat-tools>summary');await page.click('.paper-tools summary');await page.click('#build-graph');
   await until(()=>job.status==='error');assert.equal(files.get(id).graphRevision,1);
+  assert.equal(await page.locator('#graph-dismiss').isVisible(),false,'errors must remain visible');
   await page.locator('#graph-resume').waitFor({state:'visible'});await page.click('#graph-resume');
   await until(()=>job.status==='done');assert.equal(files.get(id).graphRevision,2);assert.ok(replayed>=1);
   graphSourceOverride='';
@@ -274,10 +288,16 @@ try {
   await page.click('#back-library');await idle();
   nextImport='doc';await page.click('#import-pdf');await idle();await page.click(`[data-paper="${docId}"]`);await idle();
   assert.ok((await page.locator('.word-page').innerText()).includes('采用对照与调整方法'));
+  const beforeLocalBuild=modelCalls;
   await page.click('[data-tab="chat"]');if(!await page.locator('.chat-tools').evaluate(el=>el.open))await page.locator('.chat-tools > summary').click();if(!await page.locator('.paper-tools').evaluate(el=>el.open))await page.locator('.paper-tools > summary').click();await page.click('#import-summary');await idle();await until(()=>job.status==='done');await page.waitForFunction(()=>document.querySelector('#graph-progress-text').textContent.includes('已保存'));
   assert.equal(files.get(docId).graphSummary.name,'ChatGPT-summary.txt');assert.equal(files.get(docId).graph.importedSummary.name,'ChatGPT-summary.txt');
-  assert.ok(files.get(docId).graph.paragraphs[0].summary.length>220);assert.equal(files.get(docId).graph.paragraphs[0].importance,'high');assert.ok(files.get(docId).graph.terms.some(t=>t.name==='exchangeability'));
+  assert.equal(modelCalls,beforeLocalBuild,'imported navigation must make zero model requests');assert.equal(files.get(docId).graph.stats.calls,0);assert.ok(files.get(docId).graph.navigation.nodes.length>0);
   await page.click('[data-tab="graph"]');assert.ok((await page.locator('#graph-content').innerText()).includes('来自导入总结'));await page.screenshot({path:path.join(out,'09-imported-summary.png')});
+  await page.locator('[data-navigation]').first().evaluate(el=>el.click());await page.locator('#chat-panel').waitFor({state:'visible'});
+  assert.ok(files.get(docId).threads.some(t=>t.navigationNodeId));
+  if(!await page.locator('.chat-tools').evaluate(el=>el.open))await page.locator('.chat-tools>summary').click();
+  if(!await page.locator('.paper-tools').evaluate(el=>el.open))await page.locator('.paper-tools>summary').click();
+  await page.click('#rebuild-summary');await idle();await until(()=>job.status==='done');assert.equal(modelCalls,beforeLocalBuild);
 
   await page.click('#back-library');await idle();
   acceptDialog=false;await page.click(`[data-delete="${wordId}"]`);await idle();assert.ok(library.has(wordId));
@@ -289,7 +309,7 @@ try {
   assert.ok(!library.has(id));assert.ok(!files.has(id));assert.equal(job.status,'none');assert.ok(library.has(docId));
   holdGraph=false;releaseGraph();await new Promise(resolve=>setTimeout(resolve,100));
   assert.deepEqual(errors,[]);
-  await writeFile(path.join(out,'ui-report.json'),JSON.stringify({passed:true,modelCalls,replayed,deletedPaperCaches:!files.has(id)&&!files.has(wordId),translationCalls,tests:['translation cache / close / resize / font','translation server failure and AI fallback','reading session deletion','PDF import and library','3x PDF rendering and zoom redraw','PDF selection quick action','page navigation and reflow','selection and follow-up','independent background graph runtime','page navigation during graph generation','reader destroyed while graph completes','saved graph and reading state survive reopen','failed regeneration keeps old tree','resume reuses completed model responses','three independent clear controls','reading position restore','choose storage and switch back','continuous scroll mode','two-finger zoom and reflow zoom','DOCX heading/table/extraction/graph','legacy DOC text','delete cancellation','delete with running graph and caches'],scope:'Desktop Chromium at mobile viewport; mocked Android bridge and model. Not an Android-device test.'},null,2));
+  await writeFile(path.join(out,'ui-report.json'),JSON.stringify({passed:true,modelCalls,replayed,deletedPaperCaches:!files.has(id)&&!files.has(wordId),translationCalls,tests:['tablet landscape transparent PDF text layer','paper categories and filtering','persistent colored highlights and passage notes','annotation page navigation after reopen','translation cache / close / resize / font','translation server failure and AI fallback','reading session deletion','PDF import and library','3x PDF rendering and zoom redraw','PDF selection quick action','page navigation and reflow','selection and follow-up','independent background graph runtime','page navigation during graph generation','reader destroyed while graph completes','saved graph and reading state survive reopen','failed regeneration keeps old tree','resume reuses completed model responses','three independent clear controls','reading position restore','choose storage and switch back','continuous scroll mode','two-finger zoom and reflow zoom','DOCX heading/table/extraction/graph','legacy DOC text','delete cancellation','delete with running graph and caches'],scope:'Desktop Chromium at mobile and tablet landscape viewports; mocked Android bridge and model. Not an Android-device test.'},null,2));
   console.log('Mobile UI smoke passed; screenshots and report in test-results.');
 } catch(e) {
   console.log('UI failure:',e.message,'Job:',job);

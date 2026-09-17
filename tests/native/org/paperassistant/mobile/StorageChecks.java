@@ -16,7 +16,9 @@ public final class StorageChecks {
     File root=Files.createTempDirectory(Paths.get(args[0]),"native-").toFile();Context context=new Context(new File(root,"private"));Library library=new Library(context);
     File pdf=new File(root,"fixture.pdf");Files.write(pdf.toPath(),"%PDF-1.4\nTest fixture\n".getBytes("UTF-8"));
     String id=library.importPdf(Uri.parse(pdf.getAbsolutePath())).getString("id");JSONObject initial=library.load(id);
-    initial.getJSONArray("threads").put(new JSONObject().put("id","t1").put("messages",new JSONArray().put("saved question")));library.save(id,initial);
+    initial.getJSONArray("threads").put(new JSONObject().put("id","t1").put("messages",new JSONArray().put("saved question")));
+    initial.put("categories",new JSONArray().put("causal inference")).put("annotations",new JSONArray().put(new JSONObject().put("id","a1").put("text","evidence").put("color","yellow").put("note","check this")));library.save(id,initial);
+    check(library.list().getJSONArray("papers").getJSONObject(0).getJSONArray("categories").getString(0).equals("causal inference"),"library list exposes saved paper categories");
     JSONObject stale=library.load(id);
     library.commitGraph(id,new JSONObject().put("rawText","complete source").put("graph",new JSONObject().put("value","completed tree")).put("overview","saved narrative"));
     stale.put("readingPage",7);stale.getJSONArray("threads").getJSONObject(0).getJSONArray("messages").put("new question");library.save(id,stale);
@@ -32,6 +34,14 @@ public final class StorageChecks {
     restored.discardFrom(1);check(restored.checkpoints().length()==1,"retry discards invalid response and retains earlier batches");
     fails(()->restored.begin(new JSONObject(config.toString()).put("model","different"),true),"changed model cannot reuse previous checkpoints");
     check(!library.readData(id,"graph-task.json").contains("apiKey"),"task files contain no API key");
+    JSONObject summaryMeta = new JSONObject().put("rawText", "saved raw source").put("pageRanges", new JSONArray().put(new JSONObject().put("start",0).put("end",16)))
+      .put("graphBuildMode", "summary").put("graphSummary", new JSONObject().put("name","guide.docx").put("text","guide text").put("headings",new JSONArray().put(new JSONObject().put("text","Custom heading").put("level",1))));
+    JSONObject reused = GraphTask.prepareInput(new JSONObject(),summaryMeta);
+    check(reused.getString("rawText").equals("saved raw source") && reused.has("pageRanges"),"navigation rebuild reuses saved source and page positions");
+    check(reused.getJSONObject("graphSummary").getJSONArray("headings").length()==1,"background input preserves Word heading metadata");
+    JSONObject oldInput = new JSONObject().put("rawText","task snapshot").put("graphSummary",new JSONObject().put("text","older guide"));
+    GraphTask.prepareInput(oldInput,summaryMeta);
+    check(oldInput.getString("rawText").equals("task snapshot") && oldInput.getJSONObject("graphSummary").getString("text").equals("older guide"),"resuming keeps the existing source and guide snapshot");
     restored.update("stopped","stopped");
     File docx=new File(root,"fixture.docx");
     try(java.util.zip.ZipOutputStream zip=new java.util.zip.ZipOutputStream(new FileOutputStream(docx))){zip.putNextEntry(new java.util.zip.ZipEntry("word/document.xml"));zip.write("<document>Word text</document>".getBytes("UTF-8"));zip.closeEntry();}

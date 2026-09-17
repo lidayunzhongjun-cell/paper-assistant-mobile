@@ -3,6 +3,8 @@ import { sourceUnits, validatePlan, makeGraph, parseJSON, graphUsable, locateSel
 import { callModel } from '../../paper-assistant-next/src/runtime.mjs';
 import { conversationRequest, chunks } from '../../paper-assistant-next/src/core.mjs';
 import { normalizeOutline, normalizeBrief } from './outline-response.mjs';
+import {buildLocalNavigation,navigationContext} from './local-navigation.mjs';
+import {looksCorruptText} from './text-quality.mjs';
 
 export function outlineBatches(units, limit = 22000) {
   const groups = []; let group = [], size = 0;
@@ -64,6 +66,10 @@ export function sanitizeGraphRelations(graph, stats = {}) {
   return graph;
 }
 export async function buildCompactGraph(win, config, paper, signal, progress = () => {}) {
+  if(paper.graphBuildMode==='summary')return buildLocalNavigation(paper,signal,progress);
+  return buildModelGraph(win,config,paper,signal,progress);
+}
+export async function buildModelGraph(win, config, paper, signal, progress = () => {}) {
   const guide = paper.graphBuildMode === 'summary' ? paper.graphSummary : null;
   if (paper.graphBuildMode === 'summary' && !guide?.text?.trim()) throw new Error('未找到已保存总结，请重新导入');
   const stats = { calls: 0, inputCharacters: 0, outputCharacters: 0, sourceCharacters: paper.rawText.length, importedSummaryCharacters: guide?.text?.length || 0, guideCharacters: 0, skippedRelations: 0 };
@@ -174,10 +180,14 @@ export async function buildCompactGraph(win, config, paper, signal, progress = (
 }
 
 export function compactConversation(paper,thread,question,quote='') {
+  if(thread.selectionSource==='offline-ocr')return conversationRequest({...paper,rawText:''},thread,question,quote,26000,{label:'设备内 OCR 选段 · 已排除乱码文字层',text:'',originalText:''});
   if(!graphUsable(paper))return conversationRequest(paper,thread,question,quote);
   const graph=paper.graph,located=locateSelection(graph,paper.rawText,thread.selection,thread.paragraphId);
   const query=[question,quote,thread.selection,...thread.messages.filter(m=>m.status==='done').slice(-2).map(m=>m.content.slice(0,500))].join('\n');
+  const broad=!thread.selection && /全文|核心|主要|总结|概述|贡献|结论|overall|summar|main|conclusion/i.test(question);
+  const navigation=navigationContext(paper,query,thread.navigationFingerprint===graph.navigation?.fingerprint?thread.navigationNodeId:null,broad);
   const ranked=rankParagraphs(graph,query,located), ids=[...located];
+  if(navigation)ids.push(...navigation.candidateIds.slice(0,broad?6:3));
   // A detail absent from the outline must still be discoverable in the original.
   const sourceTerms=[...new Set((question.toLowerCase().match(/[a-z][a-z0-9_-]{2,}|\d+(?:\.\d+)?|[\u4e00-\u9fff]{2,}/g)||[]))].filter(t=>!['the','and','what','how','this','that','with'].includes(t)).slice(0,40);
   for(const candidate of ranked){const raw=paper.rawText.slice(candidate.p.start,candidate.p.end).toLowerCase();candidate.score+=sourceTerms.reduce((score,t)=>score+(raw.includes(t)?4:0),0);}
@@ -191,22 +201,23 @@ export function compactConversation(paper,thread,question,quote='') {
   }
   for(const id of located){const n=graph.paragraphs.findIndex(p=>p.id===id);for(const i of [n-1,n+1])if(graph.paragraphs[i])ids.push(graph.paragraphs[i].id);}
   for(const e of graph.edges.filter(e=>e.inferred)){if(ids.includes(e.from)&&e.to.startsWith('p'))ids.push(e.to);if(ids.includes(e.to)&&e.from.startsWith('p'))ids.push(e.from);}
-  const broad=!thread.selection && /全文|核心|主要|总结|概述|贡献|结论|overall|summar|main|conclusion/i.test(question);
   if(broad){for(const c of graph.chapters){const best=ranked.find(x=>x.p.chapterId===c.id&&x.p.importance==='high')||ranked.find(x=>x.p.chapterId===c.id);if(best)ids.push(best.p.id);}}
   ids.push(...ranked.slice(0,6).map(x=>x.p.id));
   // Include related definitions from other chapters, before lower scoring unconnected nodes.
   for(const term of graph.terms.filter(t=>query.toLowerCase().includes(t.name.toLowerCase())))ids.splice(located.length,0,...term.paragraphIds.slice(0,2));
-  const chosen=[...new Set(ids)].slice(0,broad?12:8), budget=broad?14000:10500;
+  const chosen=[...new Set(ids)].slice(0,broad?12:8), budget=navigation?(broad?8000:5500):(broad?14000:10500);
   const evidence=[];let used=0;
   for(let i=0;i<chosen.length;i++){
     const p=graph.paragraphs.find(p=>p.id===chosen[i]);if(!p)continue;
     const cap=Math.min(budget-used,Math.max(650,Math.floor((budget-used)/(chosen.length-i))));if(cap<=0)break;
     let start=p.start,end=p.end;
     if(end-start>cap){const found=thread.selection?paper.rawText.indexOf(thread.selection,start):-1; if(found>=start&&found<end)start=Math.max(start,found-100);end=Math.min(end,start+cap);}
-    evidence.push({id:p.id,start,end,partial:start!==p.start||end!==p.end,text:paper.rawText.slice(start,end),path:location(graph,p)});used+=end-start;
+    const source=paper.rawText.slice(start,end);if(looksCorruptText(source))continue;
+    evidence.push({id:p.id,start,end,partial:start!==p.start||end!==p.end,text:source,path:location(graph,p)});used+=end-start;
   }
-  const context=graphContext(graph,chosen,4400);context.narrative=graph.narrativeInvalidated?'全文核心因缓存清除失效，须重新核对原文':graph.narrative.length>1800?graph.narrative.slice(0,1800)+'（定位节选，完整核心保存在图谱中）':graph.narrative;
+  const context=graphContext(navigation?{...graph,narrative:''}:graph,chosen,navigation?1400:4400);context.narrative=graph.narrativeInvalidated?'全文核心因缓存清除失效，须重新核对原文':navigation?'本地原文索引；导入总结见 secondaryMaterial，回答须依据原文证据。':graph.narrative.length>1800?graph.narrative.slice(0,1800)+'（定位节选，完整核心保存在图谱中）':graph.narrative;
   const chapterBudget=Math.max(25,Math.floor(2500/Math.max(1,graph.chapters.length)));
   context.chapters=graph.chapters.map(c=>({id:c.id,title:c.title,core:c.summaryInvalidated?'已清除':c.summary.slice(0,chapterBudget)}));
-  return conversationRequest(paper,thread,question,quote,30000,{label:`本地大纲定位 · 原文 ${evidence.map(p=>p.id).join('、')}${evidence.some(p=>p.partial)?' · 含节选':''}`,graph:context,text:evidence.map(p=>`[${p.id} | ${p.path} | 字符 ${p.start}–${p.end}${p.partial?' | 节选，非完整段落':''}]\n${p.text}`).join('\n\n')});
+  if(navigation&&context.chapters.length>32){const wanted=new Set(graph.paragraphs.filter(p=>chosen.includes(p.id)).map(p=>p.chapterId));const relevant=context.chapters.filter(c=>wanted.has(c.id));for(let i=0;i<20;i++){const c=context.chapters[Math.floor(i*context.chapters.length/20)];if(!relevant.some(x=>x.id===c.id))relevant.push(c);}context.chapters=relevant.slice(0,32);context.chaptersPartial=true;}
+  return conversationRequest(paper,thread,question,quote,30000,{label:`本地大纲定位 · 原文 ${evidence.map(p=>p.id).join('、')}${evidence.some(p=>p.partial)?' · 含节选':''}`,graph:context,secondaryMaterial:navigation?.material,text:evidence.map(p=>`[${p.id} | ${p.path} | 字符 ${p.start}–${p.end}${p.partial?' | 节选，非完整段落':''}]\n${p.text}`).join('\n\n')});
 }

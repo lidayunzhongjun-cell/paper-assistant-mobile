@@ -41,3 +41,9 @@ test('old Android ReadableStream becomes async iterable for PDF text layers', as
   const found=[];for await(const value of new context.ReadableStream(['文字','层']))found.push(value);
   assert.deepEqual(found,['文字','层']);
 });
+
+test('PDF text glyphs stay transparent without modern :is selector support', async () => {
+  const css=await readFile(new URL('../web/app.css',import.meta.url),'utf8');
+  assert.match(css,/\.textLayer span,\.textLayer br\{color:transparent!important/);
+  assert.match(css,/-webkit-text-fill-color:rgba\(0,0,0,0\)!important/);
+});

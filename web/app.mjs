@@ -1,4 +1,5 @@
 import { decodeSummary } from './summary-import.mjs';
+import {navigationHTML} from './navigation-view.mjs';
 import { richText, richAnswer } from './math-render.mjs';
 import { mathPrompt, emphasisPrompt } from './math-prompt.mjs';
 import './app.css';
@@ -6,6 +7,9 @@ import { native, modelWindow, readingStore } from './bridge.mjs';
 import { PdfReader } from './pdf-reader.mjs';
 import { expandParagraph } from './paragraph-selection.mjs';
 import { mountTranslation } from './translation.mjs';
+import { resolveFontMode } from './pdf-font-mode.mjs';
+import { HIGHLIGHT_COLORS, annotationsOf, captureSelectionLocator, captureSelectionRects, categoriesOf, categoryNames, createAnnotation, excerpt, renderAnnotationOverlays, setCategories } from './annotations.mjs';
+import { looksCorruptText, recoverSelectionText } from './ocr-selection.mjs';
 import { makeThread, uid, normalize, endpointURL } from '../../paper-assistant-next/src/core.mjs';
 import { compactConversation } from './compact-graph.mjs';
 import { callModel } from '../../paper-assistant-next/src/runtime.mjs';
@@ -14,8 +18,14 @@ import { cacheControls, fullCachePatch, paragraphCachePatch, persistPatch } from
 import { escape } from '../../paper-assistant-next/src/render.mjs';
 
 const $ = id => document.getElementById(id);
+$('storage-path').nextElementSibling.firstChild.nodeValue='论文精读 2.1.0 · 核心来自 Paper Assistant Next 2.1.1';
+const readerToolsMeta=document.querySelector('#reader-tools>summary small');readerToolsMeta.id='reader-tools-meta';
+const fontModeLabel=document.createElement('label');fontModeLabel.id='font-mode-label';fontModeLabel.innerHTML='字体 <select id="font-render-mode" aria-label="PDF 字体绘制"><option value="auto">自动</option><option value="path">兼容</option><option value="web">系统</option></select>';
+document.querySelector('.reading-options').insertBefore(fontModeLabel,$('format-hint'));
+$('annotation-drawer').classList.add('annotation-inner');document.querySelector('.reader-tool-body').append($('annotation-drawer'));
 let papers = [], paper = null, thread = null, config = {}, controller = null, tab = 'reader', screen = 'library', quote = '', selected = '', draftTimer, toastTimer;
 let selectionOverride = null, selectedPage = 1;
+let selectedRects = [], selectedLocator = null, editingAnnotationId = null, annotationColor = 'yellow', currentCategory = 'all', categoryPaperId = null;
 let graphTask = null, graphPollBusy = false, graphSeen = '', graphStarting = false;
 const legacyGraphRepairs = new Set();
 const store = readingStore();
@@ -41,6 +51,7 @@ function controls() {
   $('stop').disabled = false; $('progress').hidden = !busy;
   $('selection-action').disabled = busy || !selected.trim() || Boolean(selectionOverride);
   $('read-selection').disabled = busy || !selected.trim(); $('translate-selection').disabled = busy || !selected.trim();
+  $('annotate-selection').disabled = busy || !selected.trim();
   if (!paper || !thread) return;
   const c = cacheControls(paper, thread);
   $('clear-full').disabled = busy || !c.canClearFull;
@@ -54,6 +65,8 @@ function controls() {
   const syncing = graphTask?.status === 'done' && graphSeen !== graphTask.runId + ':' + graphTask.updated;
   $('build-graph').disabled = busy || building || syncing;
   $('import-summary').disabled = busy || building || syncing;
+  $('rebuild-summary').hidden=!paper.graphSummary;
+  $('rebuild-summary').disabled=busy||building||syncing;
   $('summary-file').textContent = paper.graphSummary ? '已保存总结：' + paper.graphSummary.name : '可使用 ChatGPT 等生成的论文总结';
   $('clear-full').disabled ||= building || syncing;
   $('clear-paragraph').disabled ||= building || syncing;
@@ -74,12 +87,13 @@ const reader = new PdfReader($('pdf-host'), (page, count, zoom, mode) => {
   $('zoom-fit').textContent = Math.round(zoom * 100) + '%'; $('reading-mode').value = mode;
   $('text-mode').hidden = Boolean(reader.word);
   $('text-mode').textContent = reader.textMode ? 'PDF 原版' : '文字版';
-  $('format-hint').textContent = reader.word ? (reader.format === 'doc' ? 'DOC 纯文字 · 双指缩放' : 'Word 重排阅读页 · 双指缩放') : '双指缩放 · 长按选段';
+  $('font-mode-label').hidden=Boolean(reader.word);$('format-hint').textContent = reader.word ? (reader.format === 'doc' ? 'DOC 纯文字 · 双指缩放' : 'Word 重排阅读页 · 双指缩放') : (reader.fontMode==='path'?'兼容字体 · 长按选段':'双指缩放 · 长按选段');
   $('page-number').value = page; $('page-number').max = count; $('page-total').textContent = count;
   if (paper) { paper.readingPage = page; paper.readingZoom = zoom; paper.readingMode = mode; void save().catch(e => toast(e.message, true)); }
-  selected = ''; selectionOverride = null; $('selection-hint').textContent = '长按选中原文，带着上下文精读'; controls();
+  selected = ''; selectedRects = []; selectedLocator=null; selectionOverride = null; $('selection-hint').textContent = '长按选中原文，带着上下文精读'; controls();
   $('selection-action').disabled = true;
 }, e => toast(e.message,true));
+reader.onDecorate = () => renderHighlights();
 async function refreshLibrary() {
   const result = await native('list'); papers = result.papers.sort((a,b) => b.imported - a.imported);
   $('storage-path').textContent = result.storage;
@@ -88,11 +102,22 @@ async function refreshLibrary() {
 }
 function renderLibrary() {
   $('paper-count').textContent = papers.length + ' 篇';
+  const names = categoryNames(papers); if (currentCategory !== 'all' && currentCategory !== 'uncategorized' && !names.includes(currentCategory)) currentCategory = 'all';
+  $('category-filter').innerHTML = [{id:'all',label:'全部'}, {id:'uncategorized',label:'未分类'}, ...names.map(name=>({id:name,label:name}))].map(item => `<button data-category="${escape(item.id)}" class="${currentCategory===item.id?'active':''}">${escape(item.label)}</button>`).join('');
+  for (const button of $('category-filter').querySelectorAll('[data-category]')) button.onclick=()=>{currentCategory=button.dataset.category;renderLibrary();};
   const query = $('search').value.trim().toLowerCase();
-  const shown = papers.filter(p => p.title.toLowerCase().includes(query));
-  $('library-list').innerHTML = shown.length ? shown.map(p => `<div class="paper-row"><button class="paper-card" data-paper="${escape(p.id)}"><span class="paper-mark">${escape((p.format || 'pdf').toUpperCase())}</span><span><strong>${escape(p.title)}</strong><small>${(p.size / 1048576).toFixed(1)} MB · ${new Date(p.imported).toLocaleDateString()}<span>打开阅读 ↗</span></small></span></button><button class="delete-paper" data-delete="${escape(p.id)}" aria-label="删除 ${escape(p.title)}">删除</button></div>`).join('') : `<div class="empty">${query ? '没有找到这篇论文' : '你的第一篇论文，从这里开始。<br>导入 PDF 或 Word，随时继续阅读。'}</div>`;
+  const shown = papers.filter(p => p.title.toLowerCase().includes(query) && (currentCategory==='all' || (currentCategory==='uncategorized' ? categoriesOf(p).length===0 : categoriesOf(p).includes(currentCategory))));
+  $('library-list').innerHTML = shown.length ? shown.map(p => `<div class="paper-row"><button class="paper-card" data-paper="${escape(p.id)}"><span class="paper-mark">${escape((p.format || 'pdf').toUpperCase())}</span><span><strong>${escape(p.title)}</strong><small>${(p.size / 1048576).toFixed(1)} MB · ${new Date(p.imported).toLocaleDateString()}<span>打开阅读 ↗</span></small>${categoriesOf(p).length?`<span class="paper-categories">${categoriesOf(p).map(name=>`<i>${escape(name)}</i>`).join('')}</span>`:''}</span></button><div class="paper-row-actions"><button class="classify-paper" data-classify="${escape(p.id)}">归类</button><button class="delete-paper" data-delete="${escape(p.id)}" aria-label="删除 ${escape(p.title)}">删除</button></div></div>`).join('') : `<div class="empty">${query || currentCategory!=='all' ? '当前分类中没有找到论文' : '你的第一篇论文，从这里开始。<br>导入 PDF 或 Word，随时继续阅读。'}</div>`;
   for (const b of $('library-list').querySelectorAll('[data-delete]')) b.onclick = () => void deletePaper(b.dataset.delete);
+  for (const b of $('library-list').querySelectorAll('[data-classify]')) b.onclick = () => openCategoryDialog(b.dataset.classify);
   for (const b of $('library-list').querySelectorAll('[data-paper]')) b.onclick = () => void openPaper(b.dataset.paper);
+}
+
+function closeCategoryDialog(){categoryPaperId=null;$('category-dialog').hidden=true;$('category-new').value='';}
+function openCategoryDialog(id){
+  const meta=papers.find(item=>item.id===id);if(!meta)return;categoryPaperId=id;$('category-title').textContent='论文分类 · '+meta.title;
+  const assigned=new Set(categoriesOf(meta)),names=categoryNames(papers);$('category-choices').innerHTML=names.length?names.map(name=>`<label class="category-choice"><input type="checkbox" value="${escape(name)}" ${assigned.has(name)?'checked':''}>${escape(name)}</label>`).join(''):'<span class="muted">还没有分类，可在下方新建。</span>';
+  $('category-dialog').hidden=false;$('category-new').focus();
 }
 async function deletePaper(id) {
   const meta = papers.find(p => p.id === id); if (!meta || controller) return;
@@ -117,16 +142,16 @@ async function openPaper(id) {
       if (!Array.isArray(t.messages)) throw new Error('会话数据异常，原文件已保留');
       for (const m of t.messages) if (m.status === 'pending') { m.status = 'interrupted'; m.content = '上次请求被中断，可重试。'; }
     }
-    paper = loaded; translation.reset();
+    paper = loaded; setCategories(paper, categoriesOf(paper)); annotationsOf(paper); translation.reset();$('font-render-mode').value=paper.pdfFontMode||'auto';
     graphTask = null; graphSeen = ''; renderGraphTask();
     thread = paper.threads.find(t => t.id === paper.activeThread) || paper.threads[0];
     if (!thread) { thread = makeThread(paper); paper.threads.push(thread); }
-    quote = ''; selected = ''; $('question').value = thread.draft || ''; $('paper-title').textContent = paper.title;
-    $('reader-tools').open = false; document.querySelector('.chat-tools').open = false; document.querySelector('.paper-tools').open = false;
+    quote = ''; selected = ''; selectedRects=[]; selectedLocator=null; editingAnnotationId=null; $('annotation-editor').hidden=true; $('question').value = thread.draft || ''; $('paper-title').textContent = paper.title;
+    $('reader-tools').open = false; $('annotation-drawer').open=false; document.querySelector('.chat-tools').open = false; document.querySelector('.paper-tools').open = false;
     showScreen('paper'); showTab('reader'); renderChat();
-    try { await reader.open(paper.id, paper.readingPage || 1, {format:paper.format,mode:paper.readingMode,zoom:paper.readingZoom}); }
+    try { await reader.open(paper.id, paper.readingPage || 1, {format:paper.format,mode:paper.readingMode,zoom:paper.readingZoom,fontMode:resolveFontMode(paper.pdfFontMode||'auto',screen.width,screen.height)}); }
     catch (e) { $('pdf-host').textContent = '文档无法打开：' + (e.name === 'PasswordException' ? '此文件有密码，请先解密再导入。' : e.message); throw e; }
-    await save();
+    renderAnnotations(); await save();
     void pollGraph();
   }, false);
 }
@@ -168,6 +193,17 @@ function renderGraph() {
   }
   const g = paper.graph;
   root.innerHTML = `<div class="eyebrow">全文核心与原文索引</div><h2>树状知识图谱</h2><div class="graph-actions"><button id="graph-expand">展开全部</button><button id="graph-collapse">收起全部</button></div><div class="graph-tags">${g.chapters.length} 章 · ${g.paragraphs.length} 段 · ${g.terms.length} 项术语${g.stats ? ` · 建图 ${g.stats.calls} 次调用` : ''}</div><p class="muted">${escape(g.boundaryNote)}</p><div class="graph-narrative">${richText(g.narrativeInvalidated ? '部分段落已清除，全文串联已失效。其他节点与原文仍可使用。' : g.narrative)}</div>${g.chapters.map(c => `<details class="graph-branch" open><summary>${richText(c.title)}</summary><p>${richText(c.summaryInvalidated ? '章节串联因段落缓存清除而失效。' : c.summary)}</p>${c.children.map(s => s.kind === 'section' ? `<details class="graph-branch" open><summary>${richText(s.title)}</summary>${s.children.map(p => graphNode(p.id)).join('')}</details>` : graphNode(s.id)).join('')}</details>`).join('')}<details class="graph-branch"><summary>章节之间的关系</summary>${g.edges.filter(e => e.inferred && e.from.startsWith('c') && e.to.startsWith('c')).map(e => `<p>${escape(e.from)} → ${escape(e.to)} · ${escape(e.type)}：${richText(e.reason)}（模型推断）</p>`).join('')}</details><details class="graph-branch"><summary>独立附属术语表</summary>${g.terms.map(t => `<div class="term"><strong>${richText(t.name)}</strong><p>${richText(t.definition)}</p><div class="graph-tags">${escape(t.paragraphIds.join(' · '))}</div></div>`).join('')}</details>`;
+  if(g.navigation){
+    const source=document.createElement('details');source.className='source-navigation';source.innerHTML='<summary>原文位置索引</summary>';
+    for(const child of [...root.children].filter(el=>el.classList.contains('graph-branch')))source.append(child);
+    const container=document.createElement('div');container.innerHTML=navigationHTML(g);root.append(container,source);
+    root.querySelectorAll('[data-navigation]').forEach(button=>button.onclick=async()=>{
+      if(controller)return;const id=button.dataset.navigation,n=g.navigation.nodes.find(n=>n.id===id);
+      let target=paper.threads.find(t=>t.navigationNodeId===id&&t.navigationFingerprint===g.navigation.fingerprint);
+      if(!target){target=makeThread(paper);target.navigationNodeId=id;target.navigationFingerprint=g.navigation.fingerprint;target.title='总结条目 · '+n.title.slice(0,36);target.draft='请结合论文原文解释这一总结条目，并说明条件和局限。';paper.threads.push(target);}
+      await selectThread(target);showTab('chat');
+    });
+  }
   $('graph-expand').onclick = () => root.querySelectorAll('details').forEach(d => d.open = true);
   $('graph-collapse').onclick = () => root.querySelectorAll('details').forEach(d => d.open = false);
   root.querySelectorAll('[data-node]').forEach(b => b.onclick = async () => {
@@ -185,6 +221,7 @@ async function ensureText(signal) {
 }
 async function send() {
   const question = $('question').value.trim(); if (!question || !paper || controller) return;
+  if(thread.selection&&!thread.selectionSource&&looksCorruptText(thread.selection)){toast('当前会话保留的是旧版乱码选段，已阻止发送。请删除该会话，回到原文重新选择并精读。',true);return;}
   if (question.length > 10000 || quote.length > 12000 || thread.selection.length > 18000) { toast('请缩小问题、引用或选段范围后发送。', true); return; }
   await work('准备论文材料…', async signal => {
     config = await native('getConfig'); const target = thread, chosenQuote = quote;
@@ -218,7 +255,8 @@ async function createGraph() {
 function renderGraphTask() {
   const status = graphTask?.status || 'none';
   const repairableRelations = status === 'error' && /关系指向不存在的段落|缺少说明/.test(graphTask?.message || '');
-  $('graph-progress').hidden = status === 'none';
+  $('graph-progress').hidden = status === 'none'||(status==='done'&&paper?.dismissedGraphRunId===graphTask.runId);
+  $('graph-dismiss').hidden=status!=='done';
   $('graph-progress-text').textContent = graphTask?.message || '';
   if (status === 'error') $('graph-progress-text').textContent = repairableRelations ? '上次建图因可选关系格式异常而中断；新版会跳过无效关系并保留完整大纲。' : `生成失败${graphTask.stage ? '（' + graphTask.stage + '）' : ''}：${graphTask.message}`;
   $('graph-stop').hidden = status !== 'running';
@@ -287,6 +325,12 @@ async function clear(kind) {
 
 $('import-pdf').onclick = () => void work('导入论文…', async () => { const result = await native('import'); if (!result) return; await refreshLibrary(); toast(`已处理 ${result.papers.length} 篇论文${result.papers.some(p => p.duplicate) ? '，重复文件已合并' : ''}${result.errors.length ? '\n' + result.errors.join('\n') : ''}`, Boolean(result.errors.length)); }, false);
 $('search').oninput = renderLibrary;
+$('category-close').onclick=$('category-cancel').onclick=closeCategoryDialog;
+$('category-dialog').onclick=event=>{if(event.target===$('category-dialog'))closeCategoryDialog();};
+$('category-save').onclick=()=>void work('保存论文分类…',async()=>{
+  const id=categoryPaperId;if(!id)return;const loaded=await native('load',{paperId:id}),chosen=[...$('category-choices').querySelectorAll('input:checked')].map(input=>input.value),created=$('category-new').value.trim();if(created)chosen.push(created);
+  setCategories(loaded,chosen);await native('save',{paperId:id,paper:loaded});const meta=papers.find(item=>item.id===id);if(meta)meta.categories=[...loaded.categories];closeCategoryDialog();renderLibrary();toast('论文分类已保存。');
+},false);
 $('back-library').onclick = () => void work('保存阅读进度…', async () => { await saveDraft(); await store.flush(); await reader.close(); paper = null; thread = null; translation.reset(); showScreen('library'); await refreshLibrary(); }, false);
 $('export-paper').onclick = () => void work('导出论文与阅读数据…', async () => { await saveDraft(); await store.flush(); const done = await native('export', { paperId: paper.id }); if (done) toast('原文、图谱、缓存及问答已一起导出为 ZIP。'); }, false);
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { if (!controller) showTab(b.dataset.tab); });
@@ -297,11 +341,36 @@ $('zoom-in').onclick = () => void work('放大页面…', () => reader.setZoom(r
 $('zoom-out').onclick = () => void work('缩小页面…', () => reader.setZoom(reader.zoom - .25), false);
 $('zoom-fit').onclick = () => void work('适合屏幕…', () => reader.setZoom(1), false);
 $('reading-mode').onchange = () => void work('切换阅读模式…', () => reader.setMode($('reading-mode').value), false);
+$('font-render-mode').onchange=()=>void work('切换 PDF 字体绘制…',async()=>{paper.pdfFontMode=$('font-render-mode').value;const page=reader.page,mode=reader.mode,zoom=reader.zoom;await save();await reader.open(paper.id,page,{format:paper.format,mode,zoom,fontMode:resolveFontMode(paper.pdfFontMode,screen.width,screen.height)});renderAnnotations();},false);
 $('text-mode').onclick = () => void work('切换阅读方式…', async () => { reader.textMode = !reader.textMode; $('text-mode').textContent = reader.textMode ? 'PDF 原版' : '文字版'; await reader.render(); }, false);
+function renderHighlights(){if(paper)renderAnnotationOverlays($('pdf-host'),annotationsOf(paper));}
+function renderAnnotations(){
+  if(!paper)return;const items=annotationsOf(paper).slice().sort((a,b)=>(a.pageIndex-b.pageIndex)||(a.created-b.created));
+  $('annotation-count').textContent=items.length+' 条';$('reader-tools-meta').textContent=`页码 · 缩放 · ${items.length} 条批注`;
+  $('annotation-list').innerHTML=items.length?items.map(item=>`<button class="annotation-item" data-edit-annotation="${escape(item.id)}"><span class="annotation-dot" style="background:${HIGHLIGHT_COLORS[item.color].value}"></span><span class="annotation-copy"><strong>${escape(excerpt(item.text))}</strong><small>${item.note?escape(excerpt(item.note,70)):'仅重点标记'}</small></span><span class="annotation-page">第 ${item.pageIndex+1} 页</span></button>`).join(''):'<div class="annotation-empty">选中原文后，可添加颜色标记和笔记。</div>';
+  for(const button of $('annotation-list').querySelectorAll('[data-edit-annotation]'))button.onclick=()=>void openAnnotationEditor(button.dataset.editAnnotation,true);
+  renderHighlights();
+}
+function chooseAnnotationColor(color){annotationColor=HIGHLIGHT_COLORS[color]?color:'yellow';for(const button of $('annotation-colors').querySelectorAll('[data-highlight-color]'))button.classList.toggle('active',button.dataset.highlightColor===annotationColor);}
+function showAnnotationEditor(item,rects=[]){
+  editingAnnotationId=item?.id||null;annotationColor=item?.color||'yellow';selectedRects=item?.rects||rects;
+  $('annotation-editor-title').textContent=item?'修改重点与笔记':'添加重点与笔记';$('annotation-source').textContent=item?.text||selected;$('annotation-note').value=item?.note||'';$('annotation-delete').hidden=!item;
+  $('annotation-colors').innerHTML=Object.entries(HIGHLIGHT_COLORS).map(([id,value])=>`<button data-highlight-color="${id}" style="--swatch:${value.value}">${value.label}</button>`).join('');
+  for(const button of $('annotation-colors').querySelectorAll('[data-highlight-color]'))button.onclick=()=>chooseAnnotationColor(button.dataset.highlightColor);
+  chooseAnnotationColor(annotationColor);$('annotation-editor').hidden=false;
+}
+async function openAnnotationEditor(id=null,locate=false){
+  if(!paper)return;const items=annotationsOf(paper),item=id?items.find(value=>value.id===id):null;
+  if(item){if(locate){await reader.show(item.pageIndex+1);renderHighlights();}$('annotation-drawer').open=true;showAnnotationEditor(item);return;}
+  const selection=captureSelection();if(!selection||!selected)return;
+  const existing=items.find(value=>value.pageIndex===selectedPage-1&&normalize(value.text)===normalize(selected));if(existing){showAnnotationEditor(existing);return;}
+  showAnnotationEditor(null,captureSelectionRects(selection,$('pdf-host')));
+}
+function closeAnnotationEditor(){editingAnnotationId=null;selectedRects=[];selectedLocator=null;$('annotation-editor').hidden=true;}
 function captureSelection() {
   const selection = getSelection();
   if (selection && $('pdf-host').contains(selection.anchorNode) && $('pdf-host').contains(selection.focusNode) && selection.toString().trim()) {
-    selected = selectionOverride?.fingerprint === selection.toString() ? selectionOverride.text : selection.toString().trim(); selectedPage = selectionOverride?.fingerprint === selection.toString() ? selectionOverride.page : reader.pageForSelection(selection); if(selectionOverride?.fingerprint !== selection.toString())selectionOverride=null; return selection;
+    selected = selectionOverride?.fingerprint === selection.toString() ? selectionOverride.text : selection.toString().trim(); selectedPage = selectionOverride?.fingerprint === selection.toString() ? selectionOverride.page : reader.pageForSelection(selection); selectedRects=captureSelectionRects(selection,$('pdf-host'));selectedLocator=captureSelectionLocator(selection,$('pdf-host')); if(selectionOverride?.fingerprint !== selection.toString())selectionOverride=null; return selection;
   }
   return null;
 }
@@ -323,14 +392,32 @@ async function readSelected(immediate = false) {
   captureSelection();
   if (!selected || controller) return;
   if (selected.length > 18000) { toast('选段过长，请选择几个相关段落。', true); return; }
+  if (!reader.word && looksCorruptText(selected)) {
+    const fingerprint=getSelection()?.toString()||'', recovered=await work('检测到 PDF 文字层乱码，正在离线识别选段…', signal => recoverSelectionText({host:$('pdf-host'),page:selectedPage,rects:selectedRects,original:selected,signal,progress}),true);
+    if (!recovered) return;
+    selected=recovered.text;selectionOverride={text:selected,page:selectedPage,fingerprint,exact:false,ocr:true};
+    $('selection-hint').textContent=`离线识别 ${selected.length} 字符 · 置信度 ${recovered.confidence}% · 请核对`;
+    toast('已从 PDF 页面图像恢复选段；不会把检测到的乱码发送给 API。');
+  }
   const source = selected, sourcePage = selectedPage - 1;
   let target = paper.threads.find(t => normalize(t.selection) === normalize(source) && t.pageIndex === sourcePage);
-  if (!target) { target = makeThread(paper, source, sourcePage); paper.threads.push(target); }
+  if (!target) { target = makeThread(paper, source, sourcePage); if(selectionOverride?.ocr)target.selectionSource='offline-ocr';paper.threads.push(target); }
   await selectThread(target); showTab('chat');
   if (immediate) { $('question').value = '请精读这段：准确翻译，解释推理、全文作用和必要术语。'; await send(); }
 }
 $('read-selection').onclick = () => void readSelected(true);
-$('read-selection').onpointerdown = $('translate-selection').onpointerdown = event => event.preventDefault();
+$('read-selection').onpointerdown = $('translate-selection').onpointerdown = $('annotate-selection').onpointerdown = event => event.preventDefault();
+$('annotate-selection').onclick=()=>void openAnnotationEditor();
+$('annotation-close').onclick=closeAnnotationEditor;
+$('annotation-save').onclick=()=>void work('保存重点与笔记…',async()=>{
+  const items=annotationsOf(paper),existing=items.find(item=>item.id===editingAnnotationId),now=Date.now();
+  if(existing){existing.color=annotationColor;existing.note=$('annotation-note').value.trim().slice(0,12000);existing.updated=now;}
+  else items.push(createAnnotation({text:$('annotation-source').textContent,page:selectedPage,color:annotationColor,note:$('annotation-note').value,rects:selectedRects,locator:selectedLocator,now}));
+  await save();renderAnnotations();closeAnnotationEditor();toast('重点标记与笔记已保存。');
+},false);
+$('annotation-delete').onclick=()=>void work('删除重点与笔记…',async()=>{
+  if(!editingAnnotationId)return;paper.annotations=annotationsOf(paper).filter(item=>item.id!==editingAnnotationId);await save();renderAnnotations();closeAnnotationEditor();toast('已删除这条标记与笔记。');
+},false);
 $('selection-action').onpointerdown = event => event.preventDefault();
 $('selection-action').onclick = () => {
   if(controller)return;
@@ -343,6 +430,8 @@ const translation=mountTranslation({getPaper:()=>paper,getSelectionText:()=>{cap
 
 $('graph-stop').onclick = () => void native('graphStop', { paperId: paper.id }).then(pollGraph).catch(e => toast(e.message, true));
 $('graph-view').onclick = () => showTab('graph');
+ $('rebuild-summary').onclick=()=>void work('使用已保存总结建立本地导航…',async()=>{paper.graphBuildMode='summary';await save();await startGraph(false);},false);
+ $('graph-dismiss').onclick=()=>{if(graphTask?.status!=='done'||!paper)return;paper.dismissedGraphRunId=graphTask.runId;renderGraphTask();void save().catch(e=>toast('保存提示条状态失败：'+e.message,true));};
 $('graph-resume').onclick = () => void startGraph(true).catch(e => toast(e.message, true));
 $('threads').onchange = () => void selectThread(paper.threads.find(t => t.id === $('threads').value));
 $('delete-thread').onclick = () => void work('删除阅读会话…',async()=>{
@@ -412,7 +501,7 @@ await refreshLibrary().catch(e => toast(e.message,true));
 
 $('import-summary').onclick = () => void work('读取总结文档…', async () => {
   const target = paper; const file = await native('importSummary'); if (!file) return;
-  const summary = await decodeSummary(file); config = await native('getConfig');
-  if (!confirm(`总结：${summary.name}（${summary.text.length} 字符）\n将关联到《${target.title}》，把总结与原文定位片段发送到 ${new URL(endpointURL(config.endpoint)).host} 梳理图谱。成功后替换旧图谱，原问答保留。继续？`)) return;
+  const summary = await decodeSummary(file);
+  if (!confirm(`总结：${summary.name}（${summary.text.length} 字符）\n将为《${target.title}》在本地建立总结导航和原文候选索引，建图不调用模型、不消耗 API token。成功后替换旧图谱。继续？`)) return;
   target.graphSummary = summary; target.graphBuildMode = 'summary'; await save(); await startGraph(false);
 }, false);
