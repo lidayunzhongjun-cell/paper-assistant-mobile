@@ -5,3 +5,12 @@ build/
 android/assets/
 dist/
 test-results/
+api.txt
+PaperAssistantCache/
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
